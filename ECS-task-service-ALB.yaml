@@ -8,13 +8,157 @@ Parameters:
     Description: List of public subnet ID's to put the load balancer in
   PrivateSubnetIds:
     Type: 'List<AWS::EC2::Subnet::Id>'
-    Description: List of private subnet ID's that the AWS VPC tasks are in    
+    Description: List of private subnet ID's that the AWS VPC tasks are in
+  CertificateIds:
+    Type: String
+    Description: List of certifcates to be associated with the HTTPS listener
+  HostedZoneId:  
+    Type: String
+    Description: Route53 Hosted Zone ID
+  FQDN:  
+    Type: String
+    Description: Fully Qualified Domain Name
 Resources:
   ECSCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
       ClusterName: CFNCluster
-  ECSTaskDefinition:
+  ECSLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 7        
+  ECSTaskExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ecs-execution-role-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'logs:DescribeLogGroups'
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutLogEvents"
+                Resource: '*'
+              - Effect: Allow
+                Action: 
+                  - "kms:Decrypt"
+                  - "secretsmanager:GetSecretValue"
+                Resource: '*'
+  ServiceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for service
+      VpcId: !Ref VpcId
+  PublicLoadBalancerSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref 'HostedZoneId'
+      Comment: DNS name for my instance.
+      Name: !Ref FQDN
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+      - !GetAtt PublicLoadBalancer.DNSName          
+  PublicLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref PublicLoadBalancerSG
+  PublicLoadBalancerListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref WebAppTargetGroup
+                Weight: 100
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 80
+      Protocol: HTTP
+  # HTTPlistener:
+  #   Type: "AWS::ElasticLoadBalancingV2::Listener"
+  #   Properties:
+  #     DefaultActions:
+  #       - Type: "redirect"
+  #         RedirectConfig:
+  #           Protocol: "HTTPS"
+  #           Port: 443
+  #           Host: "#{host}"
+  #           Path: "/#{path}"
+  #           Query: "#{query}"
+  #           StatusCode: "HTTP_301"
+  #     LoadBalancerArn: !Ref PublicLoadBalancer
+  #     Port: 80
+  #     Protocol: "HTTP"  
+  HTTPSListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      Certificates: 
+        -  CertificateArn: !Ref CertificateIds   
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref WebAppTargetGroup
+                Weight: 100          
+      LoadBalancerArn: !Ref PublicLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06 
+  ListenerRule1:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref WebAppTargetGroup
+                Weight: 1
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - foo
+      ListenerArn: !Ref PublicLoadBalancerListener
+      Priority: 1      
+  ServiceIngressfromLoadBalancer:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref ServiceSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref PublicLoadBalancerSG
+  LogGroup:
+    Type: 'AWS::Logs::LogGroup'
+  WebAppTaskDefinition:
     Type: 'AWS::ECS::TaskDefinition'
     Properties:
       ContainerDefinitions:
@@ -35,25 +179,26 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              awslogs-group: /ecs/fargate-task-definition
+              awslogs-group: !Ref ECSLogGroup
               awslogs-region: us-east-1
               awslogs-stream-prefix: ecs
-          Name: sample-fargate-app
+          Name: App-Container
           PortMappings:
             - ContainerPort: 80
               HostPort: 80
               Protocol: tcp
       Cpu: 256
-      ExecutionRoleArn: 'arn:aws:iam::aws_account_id:role/ecsTaskExecutionRole'
-      Family: task-definition-cfn
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      Family: WebApp-task-definition-cfn
       Memory: 512
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
       RuntimePlatform:
         OperatingSystemFamily: LINUX
-  ECSService:
+  WebAppECSService:
     Type: 'AWS::ECS::Service'
+    DependsOn: PublicLoadBalancerListener    
     Properties:
       ServiceName: cfn-service
       Cluster: !Ref ECSCluster
@@ -61,22 +206,15 @@ Resources:
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
           SecurityGroups:
-            - sg-abcdef01234567890
-          Subnets:
-            - subnet-abcdef01234567890
-      TaskDefinition: !Ref ECSTaskDefinition
+            - !Ref ServiceSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+      TaskDefinition: !Ref WebAppTaskDefinition
       LoadBalancers:
-        - ContainerName: cfn-service
+        - ContainerName: App-Container
           ContainerPort: 80
-          TargetGroupArn: !Ref ServiceTargetGroup      
-  ServiceSecurityGroup:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      GroupDescription: Security group for service
-      VpcId: !Ref VpcId
-  ServiceTargetGroup:
+          TargetGroupArn: !Ref WebAppTargetGroup      
+  WebAppTargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
       HealthCheckIntervalSeconds: 6
@@ -92,42 +230,8 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 0
-  PublicLoadBalancerSG:
-    Type: 'AWS::EC2::SecurityGroup'
-    Properties:
-      GroupDescription: Access to the public facing load balancer
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: -1
-  PublicLoadBalancer:
-    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
-    Properties:
-      Scheme: internet-facing
-      LoadBalancerAttributes:
-        - Key: idle_timeout.timeout_seconds
-          Value: '30'
-      Subnets: !Ref PublicSubnetIds
-      SecurityGroups:
-        - !Ref PublicLoadBalancerSG
-  PublicLoadBalancerListener:
-    Type: 'AWS::ElasticLoadBalancingV2::Listener'
-    Properties:
-      DefaultActions:
-        - Type: forward
-          ForwardConfig:
-            TargetGroups:
-              - TargetGroupArn: !Ref ServiceTargetGroup
-                Weight: 100
-      LoadBalancerArn: !Ref PublicLoadBalancer
-      Port: 80
-      Protocol: HTTP
-  ServiceIngressfromLoadBalancer:
-    Type: 'AWS::EC2::SecurityGroupIngress'
-    Properties:
-      Description: Ingress from the public ALB
-      GroupId: !Ref ServiceSecurityGroup
-      IpProtocol: -1
-      SourceSecurityGroupId: !Ref PublicLoadBalancerSG
-  LogGroup:
-    Type: 'AWS::Logs::LogGroup'
+
+Outputs:
+  ALBUrl:
+    Description: A reference to the public subnet in the 2nd Availability Zone
+    Value: !GetAtt PublicLoadBalancer.DNSName    
