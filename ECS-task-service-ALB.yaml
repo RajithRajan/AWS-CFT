@@ -1,4 +1,14 @@
 AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  VpcId:
+    Type: String
+    Description: The VPC that the service is running inside of 
+  PublicSubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: List of public subnet ID's to put the load balancer in
+  PrivateSubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: List of private subnet ID's that the AWS VPC tasks are in    
 Resources:
   ECSCluster:
     Type: 'AWS::ECS::Cluster'
@@ -58,8 +68,8 @@ Resources:
             - subnet-abcdef01234567890
       TaskDefinition: !Ref ECSTaskDefinition
       LoadBalancers:
-        - ContainerName: !Ref ServiceName
-          ContainerPort: !Ref ContainerPort
+        - ContainerName: cfn-service
+          ContainerPort: 80
           TargetGroupArn: !Ref ServiceTargetGroup      
   ServiceSecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
@@ -75,7 +85,7 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       TargetType: ip
-      Port: !Ref ContainerPort
+      Port: 80
       Protocol: HTTP
       UnhealthyThresholdCount: 10
       VpcId: !Ref VpcId
